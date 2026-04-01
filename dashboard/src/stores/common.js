@@ -177,6 +177,15 @@ export const useCommonStore = defineStore({
                 "stars": pluginData?.stars ? pluginData.stars : 0,
                 "updated_at": pluginData?.updated_at ? pluginData.updated_at : "",
                 "display_name": pluginData?.display_name ? pluginData.display_name : "",
+                "astrbot_version": pluginData?.astrbot_version ? pluginData.astrbot_version : "",
+                "category": pluginData?.category ? pluginData.category : "",
+                "support_platforms": Array.isArray(pluginData?.support_platforms)
+                  ? pluginData.support_platforms
+                  : Array.isArray(pluginData?.support_platform)
+                    ? pluginData.support_platform
+                    : Array.isArray(pluginData?.platform)
+                      ? pluginData.platform
+                      : [],
               })
             }
           }

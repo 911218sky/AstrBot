@@ -1,6 +1,7 @@
 import abc
 import asyncio
 import hashlib
+import os
 import re
 import uuid
 from collections.abc import AsyncGenerator
@@ -52,9 +53,19 @@ class AstrMessageEvent(abc.ABC):
         self.is_at_or_wake_command = False
         """是否是 At 机器人或者带有唤醒词或者是私聊(插件注册的事件监听器会让 is_wake 设为 True, 但是不会让这个属性置为 True)"""
         self._extras: dict[str, Any] = {}
+        message_type = getattr(message_obj, "type", None)
+        if not isinstance(message_type, MessageType):
+            try:
+                message_type = MessageType(str(message_type))
+            except (ValueError, TypeError, AttributeError):
+                logger.warning(
+                    f"Failed to convert message type {message_obj.type!r} to MessageType. "
+                    f"Falling back to FRIEND_MESSAGE."
+                )
+                message_type = MessageType.FRIEND_MESSAGE
         self.session = MessageSession(
             platform_name=platform_meta.id,
-            message_type=message_obj.type,
+            message_type=message_type,
             session_id=session_id,
         )
         # self.unified_msg_origin = str(self.session)
@@ -78,6 +89,8 @@ class AstrMessageEvent(abc.ABC):
         """在此次事件中是否有过至少一次发送消息的操作"""
         self.call_llm = False
         """是否在此消息事件中禁止默认的 LLM 请求"""
+        self._temporary_local_files: list[str] = []
+        """Temporary local files created during this event and safe to delete when it finishes."""
 
         self.plugins_name: list[str] | None = None
         """该事件启用的插件名称列表。None 表示所有插件都启用。空列表表示没有启用任何插件。"""
@@ -159,15 +172,18 @@ class AstrMessageEvent(abc.ABC):
 
         除了文本消息外，其他消息类型会被转换为对应的占位符。如图片消息会被转换为 [图片]。
         """
-        return self._outline_chain(self.message_obj.message)
+        return self._outline_chain(getattr(self.message_obj, "message", None))
 
     def get_messages(self) -> list[BaseMessageComponent]:
         """获取消息链。"""
-        return self.message_obj.message
+        return getattr(self.message_obj, "message", [])
 
     def get_message_type(self) -> MessageType:
         """获取消息类型。"""
-        return self.message_obj.type
+        message_type = getattr(self.message_obj, "type", None)
+        if isinstance(message_type, MessageType):
+            return message_type
+        return self.session.message_type
 
     def get_session_id(self) -> str:
         """获取会话id。"""
@@ -175,21 +191,30 @@ class AstrMessageEvent(abc.ABC):
 
     def get_group_id(self) -> str:
         """获取群组id。如果不是群组消息，返回空字符串。"""
-        return self.message_obj.group_id
+        return getattr(self.message_obj, "group_id", "")
 
     def get_self_id(self) -> str:
         """获取机器人自身的id。"""
-        return self.message_obj.self_id
+        return getattr(self.message_obj, "self_id", "")
 
     def get_sender_id(self) -> str:
         """获取消息发送者的id。"""
-        return self.message_obj.sender.user_id
+        sender = getattr(self.message_obj, "sender", None)
+        if sender and isinstance(getattr(sender, "user_id", None), str):
+            return sender.user_id
+        return ""
 
     def get_sender_name(self) -> str:
         """获取消息发送者的名称。(可能会返回空字符串)"""
-        if isinstance(self.message_obj.sender.nickname, str):
-            return self.message_obj.sender.nickname
-        return ""
+        sender = getattr(self.message_obj, "sender", None)
+        if not sender:
+            return ""
+        nickname = getattr(sender, "nickname", None)
+        if nickname is None:
+            return ""
+        if isinstance(nickname, str):
+            return nickname
+        return str(nickname)
 
     def set_extra(self, key, value) -> None:
         """设置额外的信息。"""
@@ -206,9 +231,27 @@ class AstrMessageEvent(abc.ABC):
         logger.info(f"清除 {self.get_platform_name()} 的额外信息: {self._extras}")
         self._extras.clear()
 
+    def track_temporary_local_file(self, path: str) -> None:
+        if path and path not in self._temporary_local_files:
+            self._temporary_local_files.append(path)
+
+    def cleanup_temporary_local_files(self) -> None:
+        paths = list(self._temporary_local_files)
+        self._temporary_local_files.clear()
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove temporary local file %s: %s",
+                    path,
+                    e,
+                )
+
     def is_private_chat(self) -> bool:
         """是否是私聊。"""
-        return self.message_obj.type.value == (MessageType.FRIEND_MESSAGE).value
+        return self.get_message_type() == MessageType.FRIEND_MESSAGE
 
     def is_wake_up(self) -> bool:
         """是否是唤醒机器人的事件。"""
@@ -246,6 +289,12 @@ class AstrMessageEvent(abc.ABC):
 
     async def send_typing(self) -> None:
         """发送输入中状态。
+
+        默认实现为空，由具体平台按需重写。
+        """
+
+    async def stop_typing(self) -> None:
+        """停止输入中状态。
 
         默认实现为空，由具体平台按需重写。
         """
