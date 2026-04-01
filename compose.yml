@@ -1,20 +1,58 @@
-version: '3.8'
-
-# 当接入 QQ NapCat 时，请使用这个 compose 文件一键部署: https://github.com/NapNeko/NapCat-Docker/blob/main/compose/astrbot.yml
-
 services:
+
+  # =========================
+  # AstrBot 主服務
+  # =========================
   astrbot:
     image: soulter/astrbot:latest
     container_name: astrbot
     restart: always
-    ports: # mappings description: https://github.com/AstrBotDevs/AstrBot/issues/497
-      - "6185:6185" # 必选，AstrBot WebUI 端口
-      - "6199:6199" # 可选, QQ 个人号 WebSocket 端口
-      # - "6195:6195" # 可选, 企业微信 Webhook 端口
-      # - "6196:6196" # 可选, QQ 官方接口 Webhook 端口
+
+    ports:
+      - "6185:6185"   # 必選，AstrBot WebUI 端口
+      - "6199:6199"   # 可選，QQ 個人號 WebSocket 端口
+      - "8889:8889"   # LLM 記憶體管理端口
+      - "4141:4141"   # APIS 設定端口
+      # - "6195:6195" # 可選，企業微信 Webhook
+      # - "6196:6196" # 可選，QQ 官方接口 Webhook
+
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=Asia/Taipei
+
     volumes:
-      - ./data:/AstrBot/data
-      # - /etc/timezone:/etc/timezone:ro
+      - /root/AstrBot/data:/AstrBot/data
       - /etc/localtime:/etc/localtime:ro
+
+    # 用 label 交給 scope=astrbot 的 watchtower 管
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.scope=astrbot"
+
+
+  # =========================
+  # Watchtower 自動更新服務
+  # =========================
+  astrbot_watchtower:
+    image: containrrr/watchtower:latest
+    container_name: astrbot_watchtower
+    restart: always
+
+    environment:
+      - TZ=Asia/Taipei
+      - WATCHTOWER_LABEL_ENABLE=true     # 只處理有 enable label 的容器
+      - WATCHTOWER_SCOPE=astrbot         # 只管 scope=astrbot
+      - WATCHTOWER_POLL_INTERVAL=300     # 每 5 分鐘檢查
+      - WATCHTOWER_CLEANUP=true          # 清理舊 image
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    # 讓 watchtower 自己也屬於同一個 scope
+    labels:
+      - "com.centurylinklabs.watchtower.scope=astrbot"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"   # 10m * 3 ≈ 30MB
