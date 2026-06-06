@@ -508,12 +508,32 @@ class InternalAgentSubStage(Stage):
             # token_usage = runner_stats.token_usage.total
             token_usage = llm_response.usage.total if llm_response.usage else None
 
-        await self.conv_manager.update_conversation(
-            event.unified_msg_origin,
-            req.conversation.cid,
-            history=message_to_save,
-            token_usage=token_usage,
-        )
+        for attempt in range(HISTORY_SQLITE_LOCK_RETRY_ATTEMPTS):
+            last_attempt = attempt == HISTORY_SQLITE_LOCK_RETRY_ATTEMPTS - 1
+            try:
+                await self.conv_manager.update_conversation(
+                    event.unified_msg_origin,
+                    req.conversation.cid,
+                    history=message_to_save,
+                    token_usage=token_usage,
+                )
+                break
+            except asyncio.CancelledError:
+                raise
+            except OperationalError as e:
+                if _is_sqlite_database_locked_error(e) and not last_attempt:
+                    logger.warning(
+                        "Save conversation history hit SQLite lock, retrying "
+                        "%s/%s: %s",
+                        attempt + 1,
+                        HISTORY_SQLITE_LOCK_RETRY_ATTEMPTS,
+                        e,
+                    )
+                    await _sleep_before_sqlite_retry(
+                        HISTORY_SQLITE_LOCK_RETRY_BASE_DELAY, attempt
+                    )
+                    continue
+                raise
 
 
 # we prevent astrbot from connecting to known malicious hosts
@@ -521,6 +541,8 @@ class InternalAgentSubStage(Stage):
 BLOCKED = {"dGZid2h2d3IuY2xvdWQuc2VhbG9zLmlv", "a291cmljaGF0"}
 decoded_blocked = [base64.b64decode(b).decode("utf-8") for b in BLOCKED]
 
+HISTORY_SQLITE_LOCK_RETRY_ATTEMPTS = 5
+HISTORY_SQLITE_LOCK_RETRY_BASE_DELAY = 0.3
 PROVIDER_STATS_SQLITE_LOCK_RETRY_ATTEMPTS = 3
 PROVIDER_STATS_SQLITE_LOCK_RETRY_BASE_DELAY = 0.2
 
@@ -529,6 +551,10 @@ def _is_sqlite_database_locked_error(exc: OperationalError) -> bool:
     raw = getattr(exc, "orig", exc)
     message = str(raw).lower()
     return "database" in message and "locked" in message
+
+
+async def _sleep_before_sqlite_retry(base_delay: float, attempt: int) -> None:
+    await asyncio.sleep(base_delay * (2**attempt))
 
 
 async def _record_internal_agent_stats(
@@ -583,8 +609,8 @@ async def _record_internal_agent_stats(
             raise
         except OperationalError as e:
             if _is_sqlite_database_locked_error(e) and not last_attempt:
-                await asyncio.sleep(
-                    PROVIDER_STATS_SQLITE_LOCK_RETRY_BASE_DELAY * (2**attempt)
+                await _sleep_before_sqlite_retry(
+                    PROVIDER_STATS_SQLITE_LOCK_RETRY_BASE_DELAY, attempt
                 )
                 continue
             logger.warning("Persist provider stats failed: %s", e, exc_info=True)
