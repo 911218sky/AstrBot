@@ -5,7 +5,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from deprecated import deprecated
+from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from astrbot.core.db.po import (
     ApiKey,
@@ -24,7 +27,22 @@ from astrbot.core.db.po import (
     ProviderStat,
     SessionProjectRelation,
     Stats,
+    UmoAlias,
+    WebChatThread,
 )
+
+
+def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=20000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.execute("PRAGMA mmap_size=134217728")
+        cursor.execute("PRAGMA optimize")
+    finally:
+        cursor.close()
 
 
 @dataclass
@@ -39,14 +57,29 @@ class BaseDatabase(abc.ABC):
         # second write is attempted.  Setting timeout=30 tells SQLite to
         # wait up to 30 s for the lock, which is enough to ride out brief
         # write bursts from concurrent agent/metrics/session operations.
-        is_sqlite = "sqlite" in self.DATABASE_URL
+        db_url = make_url(self.DATABASE_URL)
+        is_sqlite = db_url.get_backend_name() == "sqlite"
         connect_args = {"timeout": 30} if is_sqlite else {}
+        engine_kwargs = {
+            "echo": False,
+            "future": True,
+            "connect_args": connect_args,
+        }
+        if is_sqlite:
+            # Keep SQLite async engines off SQLAlchemy's default async queue
+            # pool so packaged runtimes don't depend on dialect-specific pool
+            # event support.
+            engine_kwargs["poolclass"] = NullPool
         self.engine = create_async_engine(
             self.DATABASE_URL,
-            echo=False,
-            future=True,
-            connect_args=connect_args,
+            **engine_kwargs,
         )
+        if is_sqlite:
+            event.listen(
+                self.engine.sync_engine,
+                "connect",
+                _configure_sqlite_connection,
+            )
         self.AsyncSessionLocal = async_sessionmaker(
             self.engine,
             class_=AsyncSession,
@@ -204,8 +237,24 @@ class BaseDatabase(abc.ABC):
         content: dict,
         sender_id: str | None = None,
         sender_name: str | None = None,
+        llm_checkpoint_id: str | None = None,
     ) -> PlatformMessageHistory:
         """Insert a new platform message history record."""
+        ...
+
+    @abc.abstractmethod
+    async def update_platform_message_history(
+        self,
+        message_id: int,
+        content: dict | None = None,
+        llm_checkpoint_id: str | None = None,
+    ) -> None:
+        """Update a platform message history record."""
+        ...
+
+    @abc.abstractmethod
+    async def delete_platform_message_history_by_id(self, message_id: int) -> None:
+        """Delete a platform message history record by its ID."""
         ...
 
     @abc.abstractmethod
@@ -235,6 +284,68 @@ class BaseDatabase(abc.ABC):
         message_id: int,
     ) -> PlatformMessageHistory | None:
         """Get a platform message history record by its ID."""
+        ...
+
+    @abc.abstractmethod
+    async def create_webchat_thread(
+        self,
+        creator: str,
+        parent_session_id: str,
+        parent_message_id: int,
+        base_checkpoint_id: str,
+        selected_text: str,
+    ) -> WebChatThread:
+        """Create a WebChat side thread."""
+        ...
+
+    @abc.abstractmethod
+    async def get_webchat_thread_by_id(
+        self,
+        thread_id: str,
+    ) -> WebChatThread | None:
+        """Get a WebChat side thread by thread_id."""
+        ...
+
+    @abc.abstractmethod
+    async def get_webchat_threads_by_parent_session(
+        self,
+        parent_session_id: str,
+        creator: str | None = None,
+    ) -> list[WebChatThread]:
+        """Get side threads for a parent WebChat session."""
+        ...
+
+    @abc.abstractmethod
+    async def get_webchat_thread_by_parent_message_and_text(
+        self,
+        parent_session_id: str,
+        parent_message_id: int,
+        selected_text: str,
+        creator: str | None = None,
+    ) -> WebChatThread | None:
+        """Get an existing side thread for the same selected text."""
+        ...
+
+    @abc.abstractmethod
+    async def delete_webchat_thread(self, thread_id: str) -> None:
+        """Delete a WebChat side thread."""
+        ...
+
+    @abc.abstractmethod
+    async def delete_webchat_threads_by_parent_session(
+        self,
+        parent_session_id: str,
+    ) -> list[str]:
+        """Delete side threads for a parent WebChat session."""
+        ...
+
+    @abc.abstractmethod
+    async def delete_webchat_threads_by_parent_message_ids(
+        self,
+        parent_session_id: str,
+        parent_message_ids: list[int],
+    ) -> list[str]:
+        """Delete side threads linked to parent message IDs."""
         ...
 
     @abc.abstractmethod
@@ -720,6 +831,31 @@ class BaseDatabase(abc.ABC):
     @abc.abstractmethod
     async def delete_platform_session(self, session_id: str) -> None:
         """Delete a Platform session by its ID."""
+        ...
+
+    # ====
+    # UMO Alias Management
+    # ====
+
+    @abc.abstractmethod
+    async def upsert_umo_alias(
+        self,
+        umo: str,
+        creator_sender_id: str,
+        auto_name: str | None,
+        user_alias: str | None,
+    ) -> UmoAlias:
+        """Create or update the display alias metadata for a UMO."""
+        ...
+
+    @abc.abstractmethod
+    async def get_umo_alias(self, umo: str) -> UmoAlias | None:
+        """Get alias metadata for one UMO."""
+        ...
+
+    @abc.abstractmethod
+    async def get_umo_aliases(self, umos: list[str] | None = None) -> list[UmoAlias]:
+        """Get alias metadata, optionally restricted to the given UMO list."""
         ...
 
     # ====

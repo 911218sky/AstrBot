@@ -1,15 +1,41 @@
 <script setup>
-import { ref, shallowRef, onMounted, onUnmounted, watch } from 'vue';
+import { ref, shallowRef, computed, onMounted, onUnmounted, watch } from 'vue';
+import { useTheme } from 'vuetify';
 import { useCustomizerStore } from '../../../stores/customizer';
 import { useI18n } from '@/i18n/composables';
-import sidebarItems from './sidebarItem';
+import sidebarItems, { MORE_GROUP_KEY } from './sidebarItem';
 import NavItem from './NavItem.vue';
 import { applySidebarCustomization } from '@/utils/sidebarCustomization';
 import ChangelogDialog from '@/components/shared/ChangelogDialog.vue';
+import { usePluginSidebarItems } from '@/composables/usePluginSidebarItems';
 
 const { t, locale } = useI18n();
 
 const customizer = useCustomizerStore();
+const theme = useTheme();
+const { pluginItems } = usePluginSidebarItems();
+
+function buildSidebarMenu() {
+  const base = applySidebarCustomization(sidebarItems);
+  if (!pluginItems.value?.children?.length) return base;
+
+  const result = [];
+
+  for (const item of base) {
+    if (item.title === MORE_GROUP_KEY) {
+      result.push(pluginItems.value);
+      result.push(item);
+    } else {
+      result.push(item);
+    }
+  }
+
+  if (!base.some((item) => item.title === MORE_GROUP_KEY)) {
+    result.push(pluginItems.value);
+  }
+
+  return result;
+}
 
 function collectGroupValues(items, values = new Set()) {
   items.forEach((item) => {
@@ -39,7 +65,7 @@ function getInitialOpenedItems(menuItems) {
   }
 }
 
-const sidebarMenu = shallowRef(applySidebarCustomization(sidebarItems));
+const sidebarMenu = shallowRef(buildSidebarMenu());
 
 // 侧边栏分组展开状态持久化
 const openedItems = ref(getInitialOpenedItems(sidebarMenu.value));
@@ -47,8 +73,14 @@ watch(openedItems, (val) => {
   localStorage.setItem('sidebar_openedItems', JSON.stringify(sanitizeOpenedItems(val, sidebarMenu.value)));
 }, { deep: true });
 
+// 当插件项变化时（如插件启用/停用），刷新菜单
+watch(pluginItems, () => {
+  sidebarMenu.value = buildSidebarMenu();
+  openedItems.value = sanitizeOpenedItems(openedItems.value, sidebarMenu.value);
+});
+
 function refreshSidebarMenu() {
-  sidebarMenu.value = applySidebarCustomization(sidebarItems);
+  sidebarMenu.value = buildSidebarMenu();
   openedItems.value = sanitizeOpenedItems(openedItems.value, sidebarMenu.value);
 }
 
@@ -84,53 +116,58 @@ const minSidebarWidth = 200;
 const maxSidebarWidth = 300;
 const isResizing = ref(false);
 
-const iframeStyle = ref({
-  position: 'fixed',
-  bottom: '16px',
-  right: '16px',
-  width: '490px',
-  height: '640px',
-  minWidth: '300px',
-  minHeight: '200px',
-  background: 'white',
-  resize: 'both',
-  overflow: 'auto',
-  zIndex: '10000000',
-  borderRadius: '12px',
-  boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.1)',
-});
+const isDark = computed(() => customizer.uiTheme === 'PurpleThemeDark');
+const themeColors = computed(() => theme.current.value.colors);
+const iframeBackground = computed(() => isDark.value ? themeColors.value.surface || 'white' : 'white');
+const dragHeaderBackground = computed(() => isDark.value ? themeColors.value.mcpCardBg || themeColors.value.surface || 'white' : '#f0f0f0');
+const frameBorder = computed(() => `1px solid ${isDark.value ? (themeColors.value.borderLight || '#ccc') : '#ccc'}`);
 
-if (window.innerWidth < 768) {
-  iframeStyle.value = {
-    position: 'fixed',
-    top: '10%',
-    left: '0%',
-    width: '100%',
-    height: '80%',
-    minWidth: '300px',
-    minHeight: '200px',
-    background: 'white',
-    resize: 'both',
-    overflow: 'auto',
-    zIndex: '1002',
-    borderRadius: '12px',
-    boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.1)',
-  };
+const isMobile = window.innerWidth < 768;
+if (isMobile) {
   customizer.Sidebar_drawer = false;
 }
 
-const dragHeaderStyle = {
+const dragPos = ref({ left: '', top: '' });
+
+const iframeStyle = computed(() => {
+  const base = isMobile
+    ? { position: 'fixed', top: '10%', left: '0%', width: '100%', height: '80%', zIndex: '1002' }
+    : { position: 'fixed', bottom: '16px', right: '16px', width: '490px', height: '640px', zIndex: '10000000' };
+  const pos = dragPos.value.left ? { left: dragPos.value.left, top: dragPos.value.top, bottom: 'auto', right: 'auto' } : {};
+  return {
+    ...base,
+    ...pos,
+    minWidth: '300px',
+    minHeight: '200px',
+    background: iframeBackground.value,
+    resize: 'both',
+    overflow: 'auto',
+    borderRadius: '12px',
+    boxShadow: isDark.value ? '0px 4px 16px rgba(0, 0, 0, 0.5)' : '0px 4px 12px rgba(0, 0, 0, 0.1)',
+  };
+});
+
+const iframeInnerStyle = computed(() => ({
+  width: '100%',
+  height: 'calc(100% - 66px)',
+  border: 'none',
+  borderBottomLeftRadius: '12px',
+  borderBottomRightRadius: '12px',
+  filter: isDark.value ? 'invert(0.88) hue-rotate(180deg)' : 'none',
+}));
+
+const dragHeaderStyle = computed(() => ({
   width: '100%',
   padding: '8px',
-  background: '#f0f0f0',
-  borderBottom: '1px solid #ccc',
+  background: dragHeaderBackground.value,
+  borderBottom: frameBorder.value,
   borderTopLeftRadius: '8px',
   borderTopRightRadius: '8px',
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'center',
   cursor: 'move'
-};
+}));
 
 function toggleIframe() {
   showIframe.value = !showIframe.value;
@@ -138,7 +175,7 @@ function toggleIframe() {
 
 function openIframeLink(url) {
   if (typeof window !== 'undefined') {
-    let url_ = url || "https://astrbot.app";
+    let url_ = url || "https://docs.astrbot.app";
     window.open(url_, "_blank");
   }
 }
@@ -208,9 +245,8 @@ function moveAt(clientX, clientY) {
   const dm = document.getElementById('draggable-iframe');
   const newLeft = clamp(clientX - offsetX, 0, window.innerWidth - dm.offsetWidth);
   const newTop = clamp(clientY - offsetY, 0, window.innerHeight - dm.offsetHeight);
-  // 将拖拽后的位置同步到响应式样式变量中
-  iframeStyle.value.left = newLeft + 'px';
-  iframeStyle.value.top = newTop + 'px';
+  // Sync dragged position to reactive variable
+  dragPos.value = { left: newLeft + 'px', top: newTop + 'px' };
 }
 
 function endDrag() {
@@ -226,26 +262,31 @@ function startSidebarResize(event) {
   isResizing.value = true;
   document.body.style.userSelect = 'none';
   document.body.style.cursor = 'ew-resize';
-  
+
+  // 拖拽时禁用 iframe 的 pointer-events，防止 iframe 截获 mousemove 事件导致拖拽卡住
+  const iframes = document.querySelectorAll('.plugin-page-frame');
+  iframes.forEach((el) => { el.style.pointerEvents = 'none'; });
+
   const startX = event.clientX;
   const startWidth = sidebarWidth.value;
-  
+
   function onMouseMoveResize(event) {
     if (!isResizing.value) return;
-    
+
     const deltaX = event.clientX - startX;
     const newWidth = Math.max(minSidebarWidth, Math.min(maxSidebarWidth, startWidth + deltaX));
     sidebarWidth.value = newWidth;
   }
-  
+
   function onMouseUpResize() {
     isResizing.value = false;
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
+    iframes.forEach((el) => { el.style.pointerEvents = ''; });
     document.removeEventListener('mousemove', onMouseMoveResize);
     document.removeEventListener('mouseup', onMouseUpResize);
   }
-  
+
   document.addEventListener('mousemove', onMouseMoveResize);
   document.addEventListener('mouseup', onMouseUpResize);
 }
@@ -346,9 +387,9 @@ function openChangelogDialog() {
       <div style="display: flex; gap: 8px;">
         <v-btn
           icon
-          @click.stop="openIframeLink('https://astrbot.app')"
+          @click.stop="openIframeLink('https://docs.astrbot.app')"
           @mousedown.stop
-          style="border-radius: 8px; border: 1px solid #ccc;"
+          :style="{ borderRadius: '8px', border: frameBorder }"
         >
           <v-icon icon="mdi-open-in-new" />
         </v-btn>
@@ -356,15 +397,15 @@ function openChangelogDialog() {
           icon
           @click.stop="toggleIframe"
           @mousedown.stop
-          style="border-radius: 8px; border: 1px solid #ccc;"
+          :style="{ borderRadius: '8px', border: frameBorder }"
         >
           <v-icon icon="mdi-close" />
         </v-btn>
       </div>
     </div>
     <iframe
-      src="https://astrbot.app"
-      style="width: 100%; height: calc(100% - 66px); border: none; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;"
+      src="https://docs.astrbot.app"
+      :style="iframeInnerStyle"
       ></iframe>
   </div>
 
